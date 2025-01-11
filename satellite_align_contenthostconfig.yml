@@ -1,0 +1,67 @@
+---
+- name: Update rhsm.conf to the correct configuration based on Azure VM location
+  hosts: all
+  gather_facts: false
+
+  tasks:
+
+  - name: fail if variable is undefined
+    ansible.builtin.debug:
+      msg: "{{ inventory_hostname }} resides in {{ location | default('UNKNOWN') }}"
+    failed_when: "'UNKNOWN' in location or location is undefined"
+
+  - name: Run subscription-manager config command
+    ansible.builtin.shell: |
+      {%- if location == 'eastasia' -%}
+      {%-     set capsule_name = capsule.region1 -%}
+      {%- elif location == 'southeastasia' -%}
+      {%-     set capsule_name = capsule.region2 -%}
+      {%- elif location == 'australiaeast' -%}
+      {%-     set capsule_name = capsule.region3 -%}
+      {%- elif location == 'australiasoutheast' -%}
+      {%-     set capsule_name = capsule.region4 -%}
+      {%- else -%}
+      {%-     set capsule_name = 'UNKNOWN' -%}
+      {%- endif -%}
+      if [[ "{{ capsule_name }}" = "UNKNOWN" ]]; then
+          echo "[ NG ] Can't set capsule name based on VM location."
+      else
+          if grep --quiet "Red Hat" /etc/os-release; then
+              /usr/sbin/subscription-manager config \
+                  --rhsm.baseurl=https://{{ capsule_name }}/pulp/content \
+                  --server.hostname={{ capsule_name }} \
+                  --rhsm.manage_repos=1 2>/dev/null
+              if [[ "$?" = "0" ]]; then
+                  echo "[ OK ]" {{ inventory_hostname }} command succeeded."
+              else
+                  echo "[ NG ]" {{ inventory_hostname }} command failed."
+              fi
+          else
+              echo "[INFO] Skip, because not Red Hat machines."
+          fi
+      fi
+    become: true
+    register: job
+
+  - name: Email job result
+    mail:
+      subject: "[REPORT] Configure VM RHSM based on VM location"
+      host: "{{ email.host }}"
+      to: "{{ email.toAddr }}"
+      cc: "{{ email.ccAddr }}"
+      from: "{{ email.fromAddr }}"
+      headers:
+        - Reply-To = "{{ email.replyAddr }}"
+      port: "{{ email.port }}"
+      body: |
+        Configuration job completed.
+
+        -------------------------------
+          > HOSTNAME <
+        -------------------------------
+        {%- for HOST in ansible_play_hosts -%}
+        {%- if hostvars[HOST]['job'] is defined and hostvars[HOST]['job'] -%}
+        {{ hostvars[HOST]['job']['stdout_lines'] }}
+        {%- endif -%}
+      run_once: true
+      delegate_to: localhost
