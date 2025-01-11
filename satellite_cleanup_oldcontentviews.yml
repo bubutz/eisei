@@ -1,0 +1,55 @@
+---
+- name: Cleanup all old content views from Satellite
+  hosts: satellite
+  gather_facts: false
+
+  vars:
+    cv_to_keep: 3
+
+  tasks:
+
+  - name: Cleanup and only keep {{ cv_to_keep }} old content views
+    ansible.builtin.shell: |
+      hammer --no-headers --csv organization list --fields "Id" | while read org_id
+      do
+          hammer --no-headers --csv content-view list --organization-id "$org_id" --fields "Name" | 
+          grep -v "Default Organization View" | while read CV
+          do
+              printf "\n[Org: %s][%s]\n________________________\n" "$org_id" "$CV"
+              hammer content-view purge --async \
+                  --organization-id "$org_id" \
+                  --name "$CV" \
+                  --count "{{ cv_to_keep }}" 2>&1 | sed 's/^/ -  /'
+          done
+          unset org_id
+      done
+    register: job
+    failed_when: false
+    become: true
+
+  - name: Email job summary
+    mail:
+      subject: "Content View cleanup job result"
+      host: "{{ email.host }}"
+      to: "{{ email.toAddr }}"
+      cc: "{{ email.ccAddr }}"
+      from: "{{ email.fromAddr }}"
+      headers:
+        - Reply-To = {{ email.replyAddr }}
+      port: "{{ email.port }}"
+      subtype: html
+      body: |
+        <h3 stype="font-family: Arial;">Content View Cleanup</h3>
+        {%- for SAT in ['SATELLITE1','SATELLITE2','SATELLITE3'] -%}
+        <h4><u>{{ hostvars[SAT]['type'] }}</u> <i>({{ SAT }})</i></h4>
+        {%-     if hostvars[SAT]['job'] is defined and hostvars[SAT]['job'] -%}
+        {%-         for res in hostvars[SAT]['job']['stdout_lines'] -%}
+        <div style="font-family: Consolas; font-size: 12px;">{{ res }}</div>
+        {%-         endfor -%}
+        {%-     else -%}
+        <div> N/A </div>
+        {%-     endif -%}
+        <br>
+        {%- endfor -%}
+    run_once: true
+    delegate_to: localhost

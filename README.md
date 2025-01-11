@@ -59,3 +59,20 @@ email:
   fromAddr: "The mail address to send the email"
   replyAddr: "Who the recipient will reply to"
 
+### satellite_cleanup_oldcontentviews.yml
+
+This playbook is used to cleanup old Content Views versions.
+
+It uses host group `satellite` in the playbook to limit the hosts to only
+Satellite servers.
+
+#### Requirement:
+
+[Extra vars]
+email:
+  host: "your SMTP server"
+  port: "your SMTP server required port #"
+  toAddr: "To email address, can be a list"
+  ccAddr: "Cc email address, can be a list"
+  fromAddr: "The mail address to send the email"
+  replyAddr: "Who the recipient will reply to"
