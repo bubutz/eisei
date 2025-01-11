@@ -1,0 +1,101 @@
+---
+- name: Collect Content hosts satellite related configuration and send it to user
+  hosts: all
+  gather_facts: false
+
+  vars:
+    date: "{{ lookup('pipe', 'TZ=Asia/Kuala_lumpur date +%F') }}"
+    date_time:  "{{ lookup('pipe', 'TZ=Asia/Kuala_lumpur date +%X\ %x') }}"
+    local_tmpfile: "/tmp/{{ lookup('pipe', 'mktemp --dry-run') }}.csv"
+
+  tasks:
+
+  - name: Save result to local server
+    block:
+
+    - name: Create an empty csv file with header on localhost
+      ansible.builtin.shell: |
+        /bin/printf '"%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s",\n' \
+          "Checked Date/Time" \
+          "Hostname" \
+          "Subscription Name" \
+          "VM Location" \
+          "OS Name" \
+          "OS Version" \
+          "Release Lock" \
+          "Release Lock #" \
+          "Registered to" \
+          "CV/Lifecycle" \
+          "RHSM Hostname" \
+          "RHSM Base URL" \
+          "RHSM manage_repos" \
+            > {{ local_tmpfile }}
+      delegate_to: localhost
+      run_once: true
+
+    - name: Run collection script
+      ansible.builtin.script:
+        cmd: scripts/satellite_get_contenthostconfig.sh "{{ azure_subscription|default('UNKNOWN') }}" "{{ azure_location|default('UNKNOWN') }}"
+      register: result
+      become: true
+      failed_when: false
+      changed_when: false
+
+    - name: Store result to local server {{ local_tmpfile }}
+      ansible.builtin.lineinfile:
+        path: "{{ local_tmpfile }}"
+        create: true
+        state: present
+        insertafter: EOF
+        line: |
+          {%- for HOST in ansible_play_hosts -%}
+          {{ hostvars[HOST]['result']['stdout'] | default('"{{ date_time }}","{{ inventory_hostname }}","UNABLE TO CHECK"') }}
+          {%- endfor -%}
+      run_once: true
+      delegate_to: localhost
+
+    - name: Remove unwanted lines in csv file
+      ansible.builtin.shell: |
+        /bin/sed -i '/^arguments.*$/d' {{ local_tmpfile }}
+        /bin/sed -i '/^sudo.*$/d' {{ local_tmpfile }}
+        /bin/sed -i '/^error reading file.*$/d' {{ local_tmpfile }}
+        /bin/sed -i '/^.*cannot change locale.*$/d' {{ local_tmpfile }}
+        /bin/sed -i '/^.*readonly variable.*$/d' {{ local_tmpfile }}
+        /bin/sed -i '/^.*TMOUT.*$/d' {{ local_tmpfile }}
+        /bin/sed -i '/^.*Permission denied.*$/d' {{ local_tmpfile }}
+        /bin/sed -i '/^.*RequestsDependencyWarning.*$/d' {{ local_tmpfile }}
+        /bin/sed -i '/^.*Network error.*$/d' {{ local_tmpfile }}
+        /bin/sed -i '/^.*X509_V_FLAG_CB.*$/d' {{ local_tmpfile }}
+        /bin/sed -i '/^.*CryptographyDeprecationWarning.*$/d' {{ local_tmpfile }}
+        /bin/sed -i '/^.*from cryptography.*$/d' {{ local_tmpfile }}
+        /bin/sed -i '/^.*command not found.*$/d' {{ local_tmpfile }}
+        /bin/sed -i '/^.*No such file or directory.*$/d' {{ local_tmpfile }}
+        /bin/sed -i '/^[[:space:]]*$/d' {{ local_tmpfile }}
+      failed_when: false
+      run_once: true
+      delegate_to: localhost
+
+    - name: Send email report
+      mail:
+        subject: "RHSM report {{ date }}"
+        host: "{{ email.host }}"
+        to: "{{ email.toAddr }}"
+        cc: "{{ email.ccAddr }}"
+        from: "{{ email.fromAddr }}"
+        headers:
+          - Reply-TO = "{{ email.replyAddr }}"
+        port: "{{ email.port }}"
+        body: |
+          {{ date }} Content host report.
+        attach: "{{ local_tmpfile }}"
+      run_once: true
+      delegate_to: localhost
+
+    always:
+
+    - name: Cleanup {{ local_tmpfile }}
+      ansible.builtin.file:
+        path: "{{ local_tmpfile }}"
+        state: absent
+      run_once: true
+      delegate_to: localhost
