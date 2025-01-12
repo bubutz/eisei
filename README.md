@@ -36,6 +36,8 @@ email:
 1. Move email task to its own role/task.
 3. Ansible-fy other shelly tasks.
 
+___
+
 ### satellite_align_contenthostconfig.yml
 
 This playbook is to update content host's rhsm.conf so that it would connect to the
@@ -59,6 +61,8 @@ email:
   fromAddr: "The mail address to send the email"
   replyAddr: "Who the recipient will reply to"
 
+___
+
 ### satellite_cleanup_oldcontentviews.yml
 
 This playbook is used to cleanup old Content Views versions.
@@ -76,6 +80,8 @@ email:
   ccAddr: "Cc email address, can be a list"
   fromAddr: "The mail address to send the email"
   replyAddr: "Who the recipient will reply to"
+
+___
 
 ### satellite_patchrelease.yml
 
@@ -103,6 +109,8 @@ email:
   fromAddr: "The mail address to send the email"
   replyAddr: "Who the recipient will reply to"
 
+___
+
 ### satellite_healthcheck.yml
 
 This playbook is used to perform simple healthchecks, and perform recovery
@@ -122,7 +130,3 @@ email:
   ccAddr: "Cc email address, can be a list"
   fromAddr: "The mail address to send the email"
   replyAddr: "Who the recipient will reply to"
-
-
-
-
