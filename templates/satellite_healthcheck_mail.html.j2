@@ -1,0 +1,192 @@
+<!--
+    PREREQ:
+    host variables must have below 2 variables defined for this html template to work.
+      1) type: Satellite cluster type or name or any identifier
+      2) org: Satellite Organization name or any identifier
+ -->
+
+<html>
+
+    <head>
+
+        <style>
+            table {
+                font-family: Calibri;
+                border-collapse: collapse;
+                border: 3px solid black;
+            }
+            tr {
+                font-size: 13px;
+            }
+            td, div {
+                font-family: Consolas;
+                font-size: 13px;
+            }
+            h3 {
+                text-decoration: underline;
+            }
+        </style>
+
+    </head>
+
+    <body>
+        <h4>REPORT SUMMARY</h4>
+        <p>Basic health check report for {{ date }}</p>
+
+        {%- set color = {
+                'sat1': 'font-weight: bold; color: #03751a;',
+                'sat2': 'font-weight: bold; color: #7c028c;',
+                'dev': 'font-weight: bold; color: #0026ff;',
+                'td': 'font-family: Consolas; font-size: 10px;',
+                'Healthy': 'color: #006633; background-color: #99FF99;',
+                'FAILED': 'font-weight: bold; color: red; background-color: yellow;',
+                'CRITICAL': 'font-weight: bold; color: yellow; background-color: red;'
+        } -%}
+
+        {%- for sat_cluster in ['sat_cluster1','sat_cluster2']                      -%}
+        {%-     set cluster_name = sat_cluster.upper().split('_')[1]                -%}
+
+        <h3>{{ cluster_name }} Satellite</h3>
+
+        <table border="3" cellpadding="15">
+
+            <!-- --- TABLE HEADER -------------------------------------------------------- -->
+            <tr style="background-color: beige;">
+                <th>Type</th>
+                <th>Hostname</th>
+                <th>Portal Check</th>
+                <th>Health Check</th>
+                <th>Task Paused</th>
+                <th>Task Failed</th>
+            </tr>
+
+        {%-     for SATHOST in groups[sat_cluster]                                  -%}
+
+            <tr>
+
+                <!-- --- TYPE and HOSTNAME ----------------------------------------------- -->
+        {%-         if 'SAT1' in hostvars[SATHOST].org                                  -%}
+        {%-             set color_scheme = color.sat1                                   -%}
+        {%-         elif 'SAT2' in hostvars[SATHOST].org                                -%}
+        {%-             set color_scheme = color.sat2                                   -%}
+        {%-         else                                                                -%}
+        {%-             set color_scheme = color.dev                                    -%}
+        {%-         endif                                                               -%}
+                <td style="{{ color.td }}{{ color_scheme }}">{{ hostvars[SATHOST].type }}</td>
+                <td style="{{ color.td }}{{ color_scheme }}">{{ hostvars[SATHOST].name }}</td>
+
+                <!-- --- URL ------------------------------------------------------------- -->
+        {%-         if 'Satellite' in hostvars[SATHOST].type                            -%}
+        {%-             if 'SAT1' in hostvars[SATHOST].org                              -%}
+        {%-                 set sat_url = url.sat1                                      -%}
+        {%-                 if SAT1_url_healthcheck is not defined                      -%}
+        {%-                     set url_health = 'CRITICAL'                             -%}
+        {%-                 else                                                        -%}
+        {%-                     set url_health = SAT1_url_healthcheck                   -%}
+        {%-                 endif                                                       -%}
+        {%-             elif 'SAT2' in hostvars[SATHOST].org                            -%}
+        {%-                 set sat_url = url.sat2                                      -%}
+        {%-                 if SAT2_url_healthcheck is not defined                      -%}
+        {%-                     set url_health = 'CRITICAL'                             -%}
+        {%-                 else                                                        -%}
+        {%-                     set url_health = SAT2_url_healthcheck                   -%}
+        {%-                 endif                                                       -%}
+        {%-             endif                                                           -%}
+                <td style="{{ color[url_health] }}"><a href="{{ sat_url }}">{{ url_health }}</td>
+        {%-         else                                                                -%}
+                <td style="background-color: lightgrey;">Not Applicable</td>
+        {%-         endif                                                               -%}
+
+                <!-- --- HEALTH STATUS --------------------------------------------------- -->
+        {%-         if hostvars[SATHOST]['servicestatus_result']['stdout'] is undefined -%}
+        {%-             set service_status = 'CRITICAL'                                 -%}
+        {%-         else                                                                -%}
+        {%-             set service_status = hostvars[SATHOST]['sat_service']           -%}
+        {%-         endif                                                               -%}
+                <td style="{{ color[service_status] }}">{{ service_status }}</td>
+
+                <!-- --- TASK PAUSED ----------------------------------------------------- -->
+        {%-         if 'Satellite' in hostvars[SATHOST].type                            -%}
+        {%-             if hostvars[SATHOST]['jobpaused_result']['stdout'] is undefined -%}
+        {%-                 set task_paused = 'CRITICAL'                                -%}
+        {%-             else                                                            -%}
+        {%-                 set task_paused = hostvars[SATHOST]['sat_pausedtask']       -%}
+        {%-             endif                                                           -%}
+                <td style="{{ color[task_paused] }}">{{ task_paused }}</td>
+        {%-         else                                                                -%}
+                <td style="background-color: lightgrey;">Not Applicable</td>
+        {%-         endif                                                               -%}
+
+                <!-- --- TASK FAILED ----------------------------------------------------- -->
+        {%-         if 'Satellite' in hostvars[SATHOST].type                            -%}
+        {%-             if hostvars[SATHOST]['joberror_result']['stdout'] is undefined  -%}
+        {%-                 set task_failed = 'CRITICAL'                                -%}
+        {%-             else                                                            -%}
+        {%-                 set task_failed = hostvars[SATHOST]['sat_errortask']        -%}
+        {%-             endif                                                           -%}
+                <td style="{{ color[task_failed] }}">{{ task_failed }}</td>
+        {%-         else                                                                -%}
+                <td style="background-color: lightgrey;">Not Applicable</td>
+        {%-         endif                                                               -%}
+
+            </tr>
+
+        {%-     endfor                                                                  -%}
+
+        </table>
+
+        {%-     if cluster_name == 'CLUSTER1'                                           -%}
+        {%-         set SATHOST = 'satellite-1'                                         -%}
+        {%-     elif cluster_name == 'CLUSTER2'                                         -%}
+        {%-         set SATHOST = 'satellite-2'                                         -%}
+        {%-     endif                                                                   -%}
+
+        <!-- --- DISPLAY ALL PAUSED TASKS ------------------------------------------------ -->
+        <h4><u>PAUSED TASKS</u></h4>
+        {%-     if hostvars[SATHOST]['sat_pausedtask'] == 'FAILED'                      -%}
+        {%-         for res in hostvars[SATHOST]['jobpaused_result']['stdout_lines']    -%}
+            <div>{{ res }}</div>
+        {%-         endfor                                                              -%}
+        {%-     else                                                                    -%}
+        <h4> N/A </h4>
+        {%-     endif                                                                   -%}
+
+        <!-- --- DISPLAY ALL FAILED TASKS ------------------------------------------------ -->
+        <h4><u>FAILED TASKS</u></h4>
+        {%-     if hostvars[SATHOST]['sat_errortask'] == 'FAILED'                      -%}
+        {%-         for res in hostvars[SATHOST]['joberror_result']['stdout_lines']    -%}
+            <div>{{ res }}</div>
+        {%-         endfor                                                              -%}
+        {%-     else                                                                    -%}
+        <h4> N/A </h4>
+        {%-     endif                                                                   -%}
+
+        <br>
+
+        {%- endfor                                                                      -%}
+
+        <!-- --- LEGENDS ----------------------------------------------------------------- -->
+        <br>
+
+        <table style="border: none; font-size: 12px;">
+
+            <tr>
+                <td style="{{ color.Healthy }}">Healthy</td>
+                <td>It's healthy.</td>
+            </tr>
+
+            <tr>
+                <td style="{{ color.FAILED }}">FAILED</td>
+                <td>It failed. Need to manual check and manually fix the issue.</td>
+            </tr>
+
+            <tr>
+                <td style="{{ color.CRITICAL }}">CRITICAL</td>
+                <td>Failed unexpectedly. This possibly indicates the job can't even check the state of each tasks.</td>
+            </tr>
+
+        </table>
+
+    </body>
+
+</html>

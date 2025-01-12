@@ -102,3 +102,25 @@ email:
   ccAddr: "Cc email address, can be a list"
   fromAddr: "The mail address to send the email"
   replyAddr: "Who the recipient will reply to"
+
+### satellite_healthcheck.yml
+
+This playbook is used to perform simple healthchecks, and perform recovery
+with satellite-maintain health check command if any errors detected with the
+same command.
+
+It uses host group `satellite`, `sat_cluster1` and `sat_cluster2` in the
+playbook to limit the hosts to only Satellite and Capsule servers.
+
+#### Requirement:
+
+[Extra vars]
+email:
+  host: "your SMTP server"
+  port: "your SMTP server required port #"
+  toAddr: "To email address, can be a list"
+  ccAddr: "Cc email address, can be a list"
+  fromAddr: "The mail address to send the email"
+  replyAddr: "Who the recipient will reply to"
+
+

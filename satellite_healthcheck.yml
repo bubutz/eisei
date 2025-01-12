@@ -1,0 +1,160 @@
+---
+- name: Satellite health check
+  hosts: sat_cluster1, sat_cluster2
+  gather_facts: false
+
+  vars:
+    yest: "{{ lookup('pipe', 'TZ=Asia/Kuala_Lumpur date --date=yesterday +%F) }}"
+    date: "{{ lookup('pipe', 'TZ=Asia/Kuala_Lumpur date +%F) }}"
+    url:
+      sat1: https://satellite-1.example.com/users/login
+      sat2: https://satellite-2.example.com/users/login
+    all_result:
+
+  tasks:
+
+  - name: Portal health check
+    block:
+
+    - name: Satellite 1 portal health check
+      ansible.builtin.uri:
+        url: "{{ url.sat1 }}"
+        return_content: true
+      register: SAT1_url_result
+      ignore_errors: true
+      failed_when: false
+      changed_when: false
+
+    - name: Satellite 2 portal health check
+      ansible.builtin.uri:
+        url: "{{ url.sat2 }}"
+        return_content: true
+      register: SAT2_url_result
+      ignore_errors: true
+      failed_when: false
+      changed_when: false
+
+    - name: Set fact for portal check result
+      ansible.builtin.set_fact:
+        SAT1_url_healthcheck: |
+          {%- if SAT1_url_result.status == 200
+              and '>Login<' in SAT1_url_result.content
+              and 'Red Hat Satellite' in SAT1_url_result.content -%}
+            Healthy
+          {%- else -%}
+            FAILED
+          {%- endif -%}
+        SAT2_url_healthcheck: |
+          {%- if SAT2_url_result.status == 200
+              and '>Login<' in SAT2_url_result.content
+              and 'Red Hat Satellite' in SAT2_url_result.content -%}
+            Healthy
+          {%- else -%}
+            FAILED
+          {%- endif -%}
+
+    run_once: true
+    delegate_to: localhost
+
+  - name: Satellite health check
+    block:
+
+    - name: Satellite service health check
+      ansible.builtin.shell: |
+        yes n | /usr/bin/satellite-maintain health check | sed 's/\x1B\[[0-9;]*[JKmsu]//g;s/\r//'
+      register: servicestatus_result
+      changed_when: false
+      failed_when: false
+
+    - name: Restore service if any failed
+      ansible.builtin.shell: |
+        yes y | /usr/bin/satellite-maintain health check
+      when: "'FAIL' in servicestatus_result.stdout"
+      failed_when: false
+
+    become: true
+
+  - name: Satellite tasks check
+    block:
+
+    - name: Satellite job paused check
+      ansible.builtin.shell: |
+        hammer --output csv task list --fields "id","Action" --search "result=paused" | sed 's/,/\t/'
+      register: jobpaused_result
+      changed_when: false
+      failed_when: false
+      when: inventory_hostname in groups['satellite']
+
+    - name: Satellite job error check
+      ansible.builtin.shell: |
+        hammer --output csv task list --fields "id","Action" --search "result=error started_at={{ yest }}" | sed 's/,/\t/'
+      register: joberror_result
+      changed_when: false
+      failed_when: false
+      when: inventory_hostname in groups['satellite']
+
+    - name: Set facts for service health and tasks check
+      ansible.builtin.set_fact:
+        sat_service: |
+          {%- if 'NG' in servicestatus_result.stdout_lines -%}
+            FAILED
+          {%- else -%}
+            Healthy
+          {%- endif -%}
+        sat_pausedtask: |
+          {%- if jobpaused_result.stdout_lines is defined and jobpaused_result.stdout_lines -%}
+          {%-     if jobpaused_result.stdout_lines | length > 1 -%}
+            FAILED
+          {%-     elif jobpaused_result.stdout_lines | length = 1 -%}
+            Healthy
+          {%-     endif -%}
+          {%- endif -%}
+        sat_errortask: |
+          {%- if joberror_result.stdout_lines is defined and joberror_result.stdout_lines -%}
+          {%-     if joberror_result.stdout_lines | length > 1 -%}
+            FAILED
+          {%-     elif joberror_result.stdout_lines | length = 1 -%}
+            Healthy
+          {%-     endif -%}
+          {%- endif -%}
+
+    become: true
+
+  - name: Set facts then send email
+    block:
+
+    - name: Set all result state for mail subject use
+      ansible.builtin.set_fact:
+        all_result: |
+          {%- set sat1service = groups.sat_cluster1 | map('extract'. hostvars, 'sat_service') | flatten -%}
+          {%- set sat2service = groups.sat_cluster2 | map('extract'. hostvars, 'sat_service') | flatten -%}
+          {%- set sat1paused = groups.sat_cluster1 | map('extract'. hostvars, 'sat_service') | flatten -%}
+          {%- set sat2paused = groups.sat_cluster2 | map('extract'. hostvars, 'sat_service') | flatten -%}
+          {%- set sat1error = groups.sat_cluster1 | map('extract'. hostvars, 'sat_service') | flatten -%}
+          {%- set sat2error = groups.sat_cluster2 | map('extract'. hostvars, 'sat_service') | flatten -%}
+          {%- if 'FAILED' in SAT1_url_healthcheck or 'FAILED' in SAT2_url_healthcheck
+              or 'FAILED' in sat1service or 'FAILED' in sat2service
+              or 'FAILED' in sat1paused or 'FAILED' in sat2paused
+              or 'FAILED' in sat1error or 'FAILED' in sat2error -%}
+            CRITICAL
+          {%- else -%}
+            Healthy
+          {%- endif -%}
+      run_once: true
+
+    - name: Send email report
+      mail:
+        subject: "[{{ all_result|default('UNKNOWN') }}] Satellite health check"
+        host: "{{ email.host }}"
+        to: "{{ email.toAddr }}"
+        cc: "{{ email.ccAddr }}"
+        from: "{{ email.fromAddr }}"
+        headers:
+          - Reply-To={{ email.replyAddr }}
+          - Importance={{ 'normal' if all_result == 'Healthy' else 'high' }}
+          - Priority={{ 'normal' if all_result == 'Healthy' else 'urgent' }}
+        port: "{{ email.port }}"
+        subtype: html
+        body: "{{ lookup('template', 'satellite_healthcheck.html.j2') }}"
+      run_once: true
+      delegate_to: localhost
