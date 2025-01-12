@@ -1,0 +1,331 @@
+---
+- name: Satellite patch release task
+  hosts: satellite
+  gather_facts: false
+
+  vars:
+    dom: "{{ lookup('pipe', 'TZ=Asia/Kuala_Lumpur date +%d') }}"
+    today: "{{ lookup('pipe', 'TZ=Asia/Kuala_Lumpur date +%F') }}"
+    sleep_seconds: 30
+    delay_seconds: 90
+
+  tasks:
+
+  - name: Check if this playbook should run (manually set extra-vars 'dom=8' for it to run)
+    # This playbook ensure the playbook will run only on blow 2 days:
+    #   1) 1 day (Monday) before 2nd Tuesday (Microsoft patch Tuesday)
+    #        - Always falls between 7th -> 13th
+    #   2) 2 weeks after above release
+    #        - Always falls between 21st -> 27th
+    # No auto promoting lifecycle should run if Monday falls under below date:
+    #   1st  ->  6th    NO RUN
+    #   7th  -> 13th    RUN IF MONDAY
+    #   14th -> 20th    NO RUN
+    #   21st -> 27th    RUN IF MONDAY
+    #   28th -> 30th/31st NO RUN
+    # On Ansible AP, schedule is set to run this playbook on 1st,2nd,3rd,4th Monday.
+    # Below logic is used to check the date if the playbook should run.
+    # Required var:
+    #   dom (day-of-month)
+    ansible.builtin.meta: end_play
+    when: (dom|int) < 7 or
+          ( (dom|int) > 13 and (dom|int) < 21 ) or
+          (dom|int) > 27
+
+  - name: Fail the play when org_id or content_views or lifecycle variables are not defined
+    ansible.builtin.fail:
+      msg: Required variables are not defined.
+    when: ( org_id is undefined or org_id == '' ) or
+          ( content_views is undefined or content_views == '' ) or
+          ( lifecycle is undefined or lifecycle == '' )
+    run_once: true
+    delegate_to: localhost
+
+  - name: Main task block, required to set always task to send summary mail report for the whole job
+    block:
+
+    - name: STEP-1 Synchronize all repositories on Satellite
+      block:
+
+      - name: STEP-1 Synchronize all repositories on Satellite
+        ansible.builtin.shell: |
+          while IFS=, read -r repo_id repo_name; do
+              hammer repository synchronize --async --organization-id "{{ org_id }}" \
+                  --id "$repo_id" >/dev/null 2>&1 && {
+                      echo "[ OK ] $repo_name sync started."
+                  } || {
+                      echo "[ NG ] $repo_name fail to start."
+                  }
+          done <<< $(hammer --csv --no-headers repository list--fields id,name --organization-id "{{ org_id }}")
+        become: true
+        register: sync_job
+        failed_when: "'NG' in sync_job.stdout or sync_job.rc != 0"
+
+      - name: Wait for all repo sync to complete
+        ansible.builtin.shell: |
+          sleep {{ sleep_seconds }}
+          hammer --no-headers --csv task list --search "action ~ \"Synchronize repository\" and state = running"
+        register: sync_wait
+        delay: {{ delay_seconds }}
+        retries: 120
+        until: sync_wait.stdout_lines | length == 0
+        changed_when: false
+        become: true
+
+      - name: Verify repo sync result
+        ansible.builtin.shell: |
+          hammer --no-headers --csv repository list --fields id |
+          while read repo_id; do
+              result=$(hammer --no-headers --csv repository info --id $repo_id --fields label,"Sync/status")
+              if [[ "$(cut -d, -f2 <<< $result)" = "Success" ]]; then
+                  echo "[ OK ] $(cut -d, -f1 <<< $result) is synchronized."
+              else
+                  echo "[ NG ] $(cut -d, -f1 <<< $result) is \"$(cut -d, -f1 <<< $result)\""
+              fi
+          done
+        become: true
+        register: sync_state
+        failed_when: "'NG' in sync_state.stdout or sync_state.rc != 0"
+
+      always:
+
+      - name: Set mail facts for STEP-1 repo sync
+        ansible.builtin.set_fact:
+          sync_result: >-
+            {%- if 'NG' in sync_job.stdout
+                or (sync_wait.stdout_lines|length) > 0
+                or (sync_state is defined and 'NG' in sync_state) -%}
+              FAILED
+            {%- else -%}
+              Success
+            {%- endif -%}
+
+      - name: Email STEP-1 repo sync result
+        mail:
+          subject: "[{{ sync_result }}] {{ type }} Patch release STEP-1 Repositories Synchroniztion {{ today }}"
+          host: "{{ email.host }}"
+          to: "{{ email.toAddr }}"
+          cc: "{{ email.ccAddr }}"
+          from: "{{ email.fromAddr }}"
+          headers:
+            - Reply-To={{ email.replyAddr }}
+            - Importance={{ 'normal' if sync_result == 'Success' else 'high' }}
+            - Priority={{ 'normal' if sync_result == 'Success' else 'urgent' }}
+          port: "{{ email.port }}"
+          subtype: html
+          body: |
+            <h3>Report for STEP-1 Repositories Sync {{ sync_result }}</h3>
+            {%- if sync_result == 'FAILED' -%}
+            <div style="background-color: yellow;">Stopping subsequent STEP-2 Publish Content Views</div>
+            {%- endif -%}
+            <h4><u>{{ type }} ({{ inventory_hostname }})</u></h4>
+            <h4>Job script logs:</h4>
+            {%- if sync_job is defined and (sync_job.stdout_lines|length) > 0 -%}
+            {%-     for res in sync_job.stdout_lines -%}
+            <div style="font-family: Consolas;">{{ res }}</div>
+            {%-     endfor -%}
+            {%- endif -%}
+            {%- if sync_wait is defined and (sync_wait.stdout_lines|length) > 0 -%}
+            <div style="background-color: yellow; font-weight: bold;">Timeout while waiting for the sync to complete.</div>
+            <h4>In progress task(s):</h4>
+            {%-     for res in sync_wait.stdout_lines -%}
+            <div style="font-family: Consolas;">>> {{ res }}</div>
+            {%-     endfor -%}
+            {%- endif -%}
+            <h4>Repositories' synchroniztion status in Satellite:</h4>
+            {%- if sync_state is defined -%}
+            {%-     for res in sync_state.stdout_lines -%}
+            <div style="font-family: Consolas;">{{ res }}</div>
+            {%-     endfor -%}
+            {%- else -%}
+            <div style="background-color: yellow; font-weight: bold;">Skipped checking due to sync job failed, or timeout waiting for them to complete sync.</div>
+            {%- endif -%}
+
+    - name: STEP-2 Publish Content View version
+      block:
+
+      - name: STEP-2 Publish Content View version
+        ansible.builtin.script: |
+          scripts/satellite_patchrelease_wrapper.sh --publish-cv --organization-id {{ org_id }} --content-view {{ content_views }}
+        register: publishcv_job
+        failed_when: "'NG' in publishcv_job.stdout or 'CRIT' in publishcv_job.stdout or publishcv_job.rc != 0"
+        become: true
+
+      - name: Wait until all publishing tasks complete
+        ansible.builtin.shell: |
+          sleep {{ sleep_seconds }}
+          hammer --no-headers --csv task list \
+            --fields id,action,state,result,"started at","ended at" \
+            --search "action ~ \"Publish content view\" and state = running"
+        register: publishcv_wait
+        delay: {{ delay_seconds }}
+        retries: 120
+        until: publishcv_wait.stdout_lines | length == 0
+        changed_when: false
+        become: true
+
+      always:
+
+      - name: Set mail facts for STEP-2 publish Content Views
+        ansible.builtin.set_fact:
+          publishcv_result: |
+            {%- if 'NG' in publishcv_job.stdout
+                or 'CRIT' in publishcv_job.stdout
+                or (publishcv_wait.stdout_lines | length) == 0 -%}
+              FAILED
+            {%- else -%}
+              Healthy
+            {%- endif -%}
+
+      - name: Email STEP-2 publish Content Views result
+        mail:
+          subject: "[{{ publishcv_result }}] {{ type }} Patch release STEP-2 Publish Content View {{ today }}"
+          host: "{{ email.host }}"
+          to: "{{ email.toAddr }}"
+          cc: "{{ email.ccAddr }}"
+          from: "{{ email.fromAddr }}"
+          headers:
+            - Reply-To={{ email.replyAddr }}
+            - Importance={{ 'normal' if publishcv_result == 'Healthy' else 'high' }}
+            - Priority={{ 'normal' if publishcv_result == 'Healthy' else 'urgent' }}
+          port: "{{ email.port }}"
+          subtype: html
+          body: |-
+            <h3>Report for STEP-2 Publish Content Views {{ publishcv_result }}</h3>
+            {%- if publishcv_result == 'FAILED' -%}
+            <div style="background-color: yellow;">Stopping subsequent STEP-3 Promote Lifecycle.</div>
+            {%- endif -%}
+            <h4><u>{{ type }}</u> ({{ inventory_hostname }})</h4>
+            <h4>Job script logs:</h4>
+            {%- if publishcv_job.stdout is defined and publishcv_job.stdout != '' -%}
+            {%-     for res in publishcv_job.stdout_lines -%}
+            <div style="font-family: Consolas;">{{ res }}</div>
+            {%-     endfor -%}
+            {%- endif -%}
+            {%- if publishcv_wait.stdout_lines | length > 0 -%}
+            <div style="font-weight: bold">Timeout while waiting for the publish to complete.</div>
+            <h4>In progress task(s):</h4>
+            {%-     for res in publishcv_wait.stdout_lines -%}
+            <div style="font-family: Consolas;">>> {{ res }}</div>
+            {%-     endfor -%}
+            {%- endif -%}
+
+    - name: STEP-3 Promote Lifecycle Environments
+      block:
+
+      - name: STEP-3 Promote Lifecycle Environments
+        ansible.builtin.script: |
+          scripts/satellite_patchrelease_wrapper.sh --promote-le --organization-id {{ org_id }} --content-view {{ content-views }} --lifecycle {{ lifecycle }}
+        register: promotele_job
+        failed_when: "'NG' in promotele_job.stdout or 'CRIT' in promotele_job.stdout or promotele_job.rc != 0"
+        become: true
+
+      - name: Wait until all promote task completed
+        ansible.builtin.shell: |
+          sleep {{ sleep_seconds }}
+          hammer --no-headers --csv task list --fields ID,Action,State,Result,"Started at" \
+            --search "action ~ \"Promote Content View\" and state = running"
+          hammer --no-headers --csv task list --fields ID,Action,State,Result,"Started at" \
+            --search "action ~ \"Sync Content View on Capsule\" and state = running"
+        register: promotele_wait
+        delay: {{ delay_seconds }}
+        retries: 200
+        until: promotele_wait.stdout_lines | length == 0
+        changed_when: false
+        become: true
+
+      always:
+
+      - name: Set mail facts for STEP-3 Promote Lifecycle
+        ansible.builtin.set_fact:
+          promotele_result: |
+            {%- if 'NG' in promotele_job.stdout
+                or 'CRIT' in promotele_job.stdout 
+                or (promotele_wait.stdout_lines | length) > 0 -%}
+              FAILED
+            {%- else -%}
+              Success
+            {%- endif -%}
+
+      - name: Email STEP-3 Promote Lifecycle Result
+        mail:
+          subject: "[{{ promotele_result }}] {{ type }} Patch release STEP-3 Promote Lifecycle Environment {{ today }}"
+          host: "{{ email.host }}"
+          to: "{{ email.toAddr }}"
+          cc: "{{ email.ccAddr }}"
+          from: "{{ email.fromAddr }}"
+          headers:
+            - Reply-To={{ email.replyAddr }}
+            - Importance={{ 'normal' if promotele_result == 'Success' else 'high' }}
+            - Priority={{ 'normal' if promotele_result == 'Success' else 'urgent' }}
+          port: "{{ email.port }}"
+          subtype: html
+          body: |
+            <h3>Report for STEP-3 Promote Lifecycle {{ promotele_result }}</h3>
+            {%- if promotele_wait.stdout_lines | length > 0 -%}
+            <div style="font-weight: bold">Timeout while waiting for the promotion to complete.</div>
+            <h4>In progress task(s):</h4>
+            {%-     for res in promotele_wait.stdout_lines -%}
+            <div style="font-family: Consolas;">>> {{ res }}</div>
+            {%-     endfor -%}
+            {%- endif -%}
+            <h4><u>{{ type }}</u> ({{ inventory_hostname }})</h4>
+            <h4>Job script logs:</h4>
+            {%- if publishle_job.stdout is defined and (publishle_job.stdout_lines | length) > 0 -%}
+            {%-     for res in publishle_job.stdout_lines -%}
+            <div style="font-family: Consolas;">>> {{ res }}</div>
+            {%-     endfor -%}
+            {%- endif -%}
+
+    always:
+
+    - name: Pause for 30 seconds before final emails
+      ansible.builtin.pause:
+        seconds: 30
+      failed_when: false
+      run_once: true
+
+    - name: Set Summary email result
+      ansible.builtin.set_fact:
+        all_result: |
+          {%- set step1_allhosts = [] -%}
+          {%- set step2_allhosts = [] -%}
+          {%- set step3_allhosts = [] -%}
+          {%- for sat in groups.satellite -%}
+          {%-     if hostvars[sat]['sync_result'] is defined and hostvars[sat]['sync_result'] -%}
+          {%-         set _ = step1_allhosts.append(sat) -%}
+          {%-     endif -%}
+          {%-     if hostvars[sat]['publishcv_result'] is defined and hostvars[sat]['publishcv_result'] -%}
+          {%-         set _ = step2_allhosts.append(sat) -%}
+          {%-     endif -%}
+          {%-     if hostvars[sat]['promotele_result'] is defined and hostvars[sat]['promotele_result'] -%}
+          {%-         set _ = step3_allhosts.append(sat) -%}
+          {%-     endif -%}
+          {%- endfor -%}
+          {%- set step1_allresult = step1_allhosts | map('extract', hostvars, 'sync_result') | flatten -%}
+          {%- set step2_allresult = step2_allhosts | map('extract', hostvars, 'publishcv_result') | flatten -%}
+          {%- set step3_allresult = step3_allhosts | map('extract', hostvars, 'promotele_result') | flatten -%}
+          {%- if 'FAILED' in step1_allresult
+              or 'FAILED' in step2_allresult 
+              or 'FAILED' in step3_allresult -%}
+          {%-     set allresult= 'FAILED' -%}
+          {%- endif -%}
+          {{ allresult | default('Success') }}
+      run_once: true
+
+    - name: Send job summary Email for all hosts ({{ ansible_play_host }})
+      mail:
+        subject: "[{{ all_result }}] Summary of Patch Release {{ today ]}"
+        host: "{{ email.host }}"
+        to: "{{ email.toAddr }}"
+        cc: "{{ email.ccAddr }}"
+        from: "{{ email.fromAddr }}"
+        headers:
+          - Reply-To={{ email.replyAddr }}
+          - Importance={{ 'normal' if all_result == 'Success' else 'high' }}
+          - Priority={{ 'normal' if all_result == 'Success' else 'urgent' }}
+        port: "{{ email.port }}"
+        subtype: html
+        body: "{{ lookup('template', 'satellite_patchrelease_summary_mail.html.j2') }}"
+      run_once: true
+      delegate_to: localhost
